@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs (rebuilt inside container)
+dist/
+build/
+
+# Version control
+.git
+.gitignore
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+server/.env
+server/serviceAccountKey.json
+
+# IDE and OS files
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Documentation
+*.md
+!README.md
+LICENSE
+
+# Testing and analysis
+coverage/
+bundle-analysis.html
+
+# Firebase / Vercel
+.firebase/
+.firebaserc
+firebase.json
+.vercel/
+
+# Backup and temp files
+*.bak
+*.backup
+*.tmp
+vite.config.js.backup
+
+# Shell scripts (not needed in container)
+*.sh
+
+# Test files
+test-*.js

@@ -154,6 +154,11 @@ const MAX_ROUTING_RADIUS_KM = 150;          // Ignore hospitals beyond 150km
 const CROSS_CITY_DISTANCE_PENALTY_KM = 200; // +200km virtual penalty for different city
 const CROSS_CITY_SCORE_PENALTY = 0.60;      // Reduce score to 60% for cross-city
 
+// Maximum capability score points that patient history may contribute.
+// History is a tiebreaker, not a primary routing driver.
+// High confidence (PRIMARY tier): up to 8 pts. Medium (SECONDARY tier): up to 5 pts.
+const HISTORY_CAPABILITY_MAX_BONUS = 8;
+
 /**
  * Detect city mismatch between emergency case and hospital.
  * Returns true if the hospital is in a DIFFERENT city than the emergency.
@@ -532,6 +537,47 @@ function calculateCapabilityScore(hospital, emergencyCase, profile) {
         score += 10;
         reasons.push('24/7 surgery available');
     }
+
+    // ── Optional: ClinicalRoutingContext from QR history ─────────────────────
+    // This block is ONLY entered when emergencyCase.clinicalContext is present
+    // AND applicable. When absent (no QR scan), execution jumps to the return
+    // below — behaviour is identical to before this block existed.
+    //
+    // clinicalIntents are high-level strings (e.g. 'advanced_cardiology').
+    // They are mapped here to the engine's own capability/specialist vocabulary
+    // so that qrRelevanceLayer has zero knowledge of engine internals.
+    const clinicalContext = emergencyCase?.clinicalContext;
+    if (clinicalContext?.applicable) {
+        const INTENT_CAPABILITY_MAP = {
+            advanced_cardiology:  { caps: ['strokeCenter', 'emergencySurgery'], specs: ['cardiologist'] },
+            advanced_neurology:   { caps: ['strokeCenter', 'ctScanAvailable', 'mriAvailable'], specs: ['neurologist'] },
+            advanced_respiratory: { caps: ['ctScanAvailable'], specs: ['pulmonologist'] },
+            advanced_renal:       { caps: [], specs: [] },
+            advanced_hepatic:     { caps: ['ctScanAvailable'], specs: [] },
+        };
+        // Bonus magnitude scales with confidence: high = 8 pts, medium = 5 pts.
+        const bonusPerIntent = clinicalContext.confidence === 'high'
+            ? HISTORY_CAPABILITY_MAX_BONUS
+            : Math.round(HISTORY_CAPABILITY_MAX_BONUS * 0.6);
+        let historyBonus = 0;
+        let historyExplained = false;
+
+        (clinicalContext.clinicalIntents || []).forEach(intent => {
+            const mapping = INTENT_CAPABILITY_MAP[intent];
+            if (!mapping) return;
+            const capMatch  = (mapping.caps  || []).some(c => hospital.clinicalCapabilities?.[c]);
+            const specMatch = (mapping.specs || []).some(s => (hospital.specialists?.[s] || 0) > 0);
+            if (capMatch || specMatch) {
+                historyBonus = Math.min(HISTORY_CAPABILITY_MAX_BONUS, historyBonus + bonusPerIntent);
+                if (!historyExplained && clinicalContext.explanation?.length) {
+                    reasons.push(clinicalContext.explanation[0]);
+                    historyExplained = true;
+                }
+            }
+        });
+        score += historyBonus;
+    }
+    // ── End ClinicalRoutingContext block ──────────────────────────────────────
 
     return { score: Math.min(100, score), reasons };
 }

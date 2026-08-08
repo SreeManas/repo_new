@@ -5,11 +5,13 @@ import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { getAuth } from 'firebase/auth';
 import { useT } from '../hooks/useT.js';
 import CameraCapture from './CameraCapture.jsx';
-import { Camera, X, Image as ImageIcon } from 'lucide-react';
+import { Camera, X, Image as ImageIcon, QrCode } from 'lucide-react';
 import TriagePanel from './ai/TriagePanel.jsx';
 import { buildTriagePayload, runAITriage, logTriageToFirestore } from '../services/triageService.js';
 import VoiceIntakePanel from './voice/VoiceIntakePanel.jsx';
 import { normalizeAndMapAIData } from '../services/voiceNormalization.js';
+import QRScanner from './QRScanner.jsx';
+import { parsePatientQR } from '../services/qrParserService.js';
 
 // Translation keys
 const TRANSLATIONS = {
@@ -117,6 +119,13 @@ export default function PatientVitalsForm() {
     // Section 10: Paramedic Notes
     const [paramedicNotes, setParamedicNotes] = useState('');
 
+    // Section 11: Insurance Information
+    const [hasInsurance, setHasInsurance] = useState(null);   // null=not answered, true=yes, false=no
+    const [insuranceProvider, setInsuranceProvider] = useState('');
+    const [insuranceProviderOther, setInsuranceProviderOther] = useState('');
+    const [insuranceCoverageRange, setInsuranceCoverageRange] = useState('');
+    const [insurancePolicyCoverage, setInsurancePolicyCoverage] = useState('');
+
     // Form state
     const [coords, setCoords] = useState({ latitude: null, longitude: null });
     const [status, setStatus] = useState('');
@@ -135,6 +144,18 @@ export default function PatientVitalsForm() {
 
     // Dispatch summary — shown after successful submission
     const [dispatchSummary, setDispatchSummary] = useState(null);
+
+    // QR Scanner State
+    const [showQRScanner, setShowQRScanner] = useState(false);
+    const [qrError, setQrError] = useState(null);
+
+    // Section: Patient History (from QR)
+    const [patientHistory, setPatientHistory] = useState(null);
+
+    // Section: Past Medical History (manually entered)
+    const [knownConditions, setKnownConditions] = useState('');
+    const [knownAllergies, setKnownAllergies] = useState('');
+    const [currentMedications, setCurrentMedications] = useState('');
 
     // Demo Mode: generate mock crew if real crew is not assigned
     function generateMockCrew() {
@@ -159,6 +180,49 @@ export default function PatientVitalsForm() {
         setVoiceFilledFields(prev => { const s = new Set(prev); s.add(id); return s; });
         setTimeout(() => setVoiceFilledFields(prev => { const s = new Set(prev); s.delete(id); return s; }), 1500);
     };
+
+    const handleQRScanSuccess = useCallback((decodedText) => {
+        const result = parsePatientQR(decodedText);
+        if (result.valid && result.data) {
+            const d = result.data;
+            if (d.name != null) { setPatientName(d.name); glowField('v-patientName'); }
+            if (d.age != null) { setAge(d.age); glowField('v-age'); }
+            if (d.gender != null) { setGender(d.gender); glowField('v-gender'); }
+
+            let notesAppend = [];
+            if (d.overallRisk != null) notesAppend.push(`QR Overall Risk: ${d.overallRisk}`);
+            if (d.heartRisk != null) notesAppend.push(`QR Heart Risk: ${d.heartRisk}`);
+            if (d.lungsRisk != null) notesAppend.push(`QR Lungs Risk: ${d.lungsRisk}`);
+            if (d.brainRisk != null) notesAppend.push(`QR Brain Risk: ${d.brainRisk}`);
+            if (d.liverRisk != null) notesAppend.push(`QR Liver Risk: ${d.liverRisk}`);
+            if (d.kidneyRisk != null) notesAppend.push(`QR Kidney Risk: ${d.kidneyRisk}`);
+            if (d.medications && d.medications.length) notesAppend.push(`QR Meds: ${d.medications.join(', ')}`);
+
+            if (notesAppend.length > 0) {
+                setParamedicNotes(prev => {
+                    const addition = notesAppend.join('\n');
+                    if (!prev || !prev.trim()) return addition;
+                    return `${prev}\n---\n${addition}`;
+                });
+                glowField('v-notes');
+            }
+
+            setPatientHistory({
+                overallRisk: d.overallRisk,
+                heartRisk: d.heartRisk,
+                lungsRisk: d.lungsRisk,
+                brainRisk: d.brainRisk,
+                liverRisk: d.liverRisk,
+                kidneyRisk: d.kidneyRisk,
+                medications: d.medications
+            });
+
+            setShowQRScanner(false);
+            setQrError(null);
+        } else {
+            setQrError(result.error || "Invalid Patient QR");
+        }
+    }, []);
 
     // ── Centralized Voice-to-Form Apply ──────────────────────────────────────
     // All AI values go through normalizeAndMapAIData() for enum matching,
@@ -369,6 +433,17 @@ export default function PatientVitalsForm() {
             errors.bloodPressure = 'Blood pressure must be in format: 120/80';
         }
 
+        // Insurance validation — provider and coverage are required when Yes is selected
+        if (hasInsurance === true) {
+            const effectiveProvider = insuranceProvider === 'Other' ? insuranceProviderOther : insuranceProvider;
+            if (!effectiveProvider || !effectiveProvider.trim()) {
+                errors.insuranceProvider = 'Insurance provider is required';
+            }
+            if (!insurancePolicyCoverage) {
+                errors.insurancePolicyCoverage = 'Policy coverage amount is required';
+            }
+        }
+
         setValidationErrors(errors);
         return Object.keys(errors).length === 0;
     };
@@ -497,6 +572,25 @@ export default function PatientVitalsForm() {
             // Case Status
             caseStatus: 'intake_completed',
 
+            // Patient History (from QR)
+            patientHistory: patientHistory || null,
+
+            // Past Medical History (manually entered)
+            pastMedicalHistory: {
+                knownConditions: knownConditions.trim() || null,
+                knownAllergies: knownAllergies.trim() || null,
+                currentMedications: currentMedications.trim() || null,
+            },
+
+            // Insurance Information
+            insurance: {
+                hasInsurance: hasInsurance === true,
+                provider: hasInsurance === true
+                    ? (insuranceProvider === 'Other' ? (insuranceProviderOther || null) : (insuranceProvider || null))
+                    : null,
+                policyCoverage: hasInsurance === true ? (insurancePolicyCoverage || null) : null
+            },
+
             // MF4: Incident Photos — uploaded atomically before case write
             incidentPhotos: []
         };
@@ -559,7 +653,7 @@ export default function PatientVitalsForm() {
                         console.warn('Firestore unavailable, queuing for later sync');
                         await offlineSync.enqueueReport({
                             type: 'emergencyCase',
-                            data: { age, gender, heartRate, spo2, emergencyType },
+                            data: { age, gender, heartRate, spo2, emergencyType, patientHistory: patientHistory || null },
                             coords: locationCoords
                         });
                         setStatus(tOfflineQueued);
@@ -570,7 +664,7 @@ export default function PatientVitalsForm() {
             } else {
                 await offlineSync.enqueueReport({
                     type: 'emergencyCase',
-                    data: { age, gender, heartRate, spo2, emergencyType },
+                    data: { age, gender, heartRate, spo2, emergencyType, patientHistory: patientHistory || null },
                     coords: locationCoords
                 });
                 setStatus(tOfflineQueued);
@@ -619,10 +713,19 @@ export default function PatientVitalsForm() {
         setSuspectedInfectious(false);
         setIsolationRequired(false);
         setParamedicNotes('');
+        setHasInsurance(null);
+        setInsuranceProvider('');
+        setInsuranceProviderOther('');
+        setInsuranceCoverageRange('');
+        setInsurancePolicyCoverage('');
         setValidationErrors({});
         setTriageResult(null);
         setTriageError(null);
         setTriageLoading(false);
+        setKnownConditions('');
+        setKnownAllergies('');
+        setCurrentMedications('');
+        setPatientHistory(null);
     };
 
     // ── AI Triage handler ──────────────────────────────────────────────────
@@ -666,8 +769,22 @@ export default function PatientVitalsForm() {
             </div>
 
             <form onSubmit={onSubmit} className="space-y-8">
-                {/* Voice Intake Mode — optional, at top of form */}
-                <VoiceIntakePanel onApplyData={applyVoiceData} />
+                {/* Top Actions: Voice & QR */}
+                <div className="flex flex-col sm:flex-row gap-4">
+                    <div className="flex-1">
+                        <VoiceIntakePanel onApplyData={applyVoiceData} />
+                    </div>
+                    <div className="flex-none flex items-center">
+                        <button
+                            type="button"
+                            onClick={() => setShowQRScanner(true)}
+                            className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl transition-colors font-medium shadow-sm h-full min-h-[56px]"
+                        >
+                            <QrCode className="w-5 h-5" />
+                            Scan Patient QR
+                        </button>
+                    </div>
+                </div>
 
                 {/* Section 1: Patient Identification */}
                 <section className="border border-gray-200 rounded-lg p-5 bg-gradient-to-r from-blue-50 to-indigo-50">
@@ -727,6 +844,85 @@ export default function PatientVitalsForm() {
                             </select>
                         </div>
                     </div>
+                </section>
+
+                {/* Section 1.5: Past Medical History */}
+                <section className="border border-gray-200 rounded-lg p-5 bg-gradient-to-r from-purple-50 to-indigo-50">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                        <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        Past Medical History
+                        {patientHistory && (
+                            <span className="ml-2 text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full font-medium">QR Data Loaded</span>
+                        )}
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Known Medical Conditions</label>
+                            <textarea
+                                className="input min-h-[80px] resize-y"
+                                value={knownConditions}
+                                onChange={(e) => setKnownConditions(e.target.value)}
+                                placeholder="e.g. Hypertension, Diabetes Type 2, Asthma..."
+                                rows={3}
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Known Allergies</label>
+                            <textarea
+                                className="input min-h-[80px] resize-y"
+                                value={knownAllergies}
+                                onChange={(e) => setKnownAllergies(e.target.value)}
+                                placeholder="e.g. Penicillin, Aspirin, Latex..."
+                                rows={3}
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Current Medications</label>
+                            <textarea
+                                className="input min-h-[80px] resize-y"
+                                value={currentMedications}
+                                onChange={(e) => setCurrentMedications(e.target.value)}
+                                placeholder="e.g. Metformin 500mg, Amlodipine 5mg..."
+                                rows={3}
+                            />
+                        </div>
+                    </div>
+
+                    {/* QR Organ Risk Panel — shown only when QR is scanned */}
+                    {patientHistory && (
+                        <div className="mt-4 pt-4 border-t border-purple-200">
+                            <p className="text-xs font-semibold text-purple-600 uppercase tracking-wide mb-3">Organ Risk Scores (from Patient QR Card)</p>
+                            <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
+                                {[
+                                    { label: 'Overall', value: patientHistory.overallRisk },
+                                    { label: 'Heart', value: patientHistory.heartRisk },
+                                    { label: 'Lungs', value: patientHistory.lungsRisk },
+                                    { label: 'Brain', value: patientHistory.brainRisk },
+                                    { label: 'Liver', value: patientHistory.liverRisk },
+                                    { label: 'Kidney', value: patientHistory.kidneyRisk },
+                                ].map(({ label, value }) => (
+                                    <div key={label} className="text-center">
+                                        <div className="text-xs text-gray-500 mb-1">{label}</div>
+                                        <div className={`text-sm font-bold px-2 py-1 rounded-md ${
+                                            value >= 70 ? 'bg-red-100 text-red-700' :
+                                            value >= 40 ? 'bg-yellow-100 text-yellow-700' :
+                                            'bg-green-100 text-green-700'
+                                        }`}>{value ?? 'N/A'}</div>
+                                    </div>
+                                ))}
+                            </div>
+                            {patientHistory.medications?.length > 0 && (
+                                <div className="mt-3">
+                                    <p className="text-xs text-gray-500 mb-1 font-medium">QR Medications on Record</p>
+                                    <p className="text-sm text-gray-800 bg-white border border-purple-200 rounded-md px-3 py-2">
+                                        {patientHistory.medications.join(', ')}
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </section>
 
                 {/* Section 2: Primary Vitals */}
@@ -1224,6 +1420,23 @@ export default function PatientVitalsForm() {
                     error={triageError}
                 />
 
+                {/* QR Scanner Modal */}
+                {showQRScanner && (
+                    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/80 p-4">
+                        <div className="bg-gray-900 rounded-xl max-w-sm w-full p-2 relative">
+                            {qrError && (
+                                <div className="mb-2 bg-red-900/50 text-red-200 p-3 rounded text-sm text-center border border-red-800">
+                                    {qrError}
+                                </div>
+                            )}
+                            <QRScanner
+                                onScanSuccess={handleQRScanSuccess}
+                                onClose={() => { setShowQRScanner(false); setQrError(null); }}
+                            />
+                        </div>
+                    </div>
+                )}
+
                 {/* Camera Modal */}
                 {showCamera && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
@@ -1247,6 +1460,159 @@ export default function PatientVitalsForm() {
                         </div>
                     </div>
                 )}
+
+                {/* Section 11: Insurance Information */}
+                <section className="border border-gray-200 rounded-lg p-5 bg-gradient-to-r from-emerald-50 to-teal-50">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                        <svg className="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                        </svg>
+                        Insurance Information
+                    </h3>
+
+                    {/* Has Insurance — Radio */}
+                    <div className="mb-5">
+                        <label className="block text-sm font-medium text-gray-700 mb-3">
+                            Does the patient have health insurance?
+                        </label>
+                        <div className="flex gap-6">
+                            <label className="flex items-center gap-2 cursor-pointer select-none">
+                                <input
+                                    type="radio"
+                                    name="hasInsurance"
+                                    value="yes"
+                                    checked={hasInsurance === true}
+                                    onChange={() => setHasInsurance(true)}
+                                    className="w-4 h-4 text-emerald-600 accent-emerald-600"
+                                />
+                                <span className="text-sm text-gray-800 font-medium">Yes</span>
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer select-none">
+                                <input
+                                    type="radio"
+                                    name="hasInsurance"
+                                    value="no"
+                                    checked={hasInsurance === false}
+                                    onChange={() => {
+                                        setHasInsurance(false);
+                                        setInsuranceProvider('');
+                                        setInsuranceProviderOther('');
+                                        setInsuranceCoverageRange('');
+                                        setInsurancePolicyCoverage('');
+                                    }}
+                                    className="w-4 h-4 text-emerald-600 accent-emerald-600"
+                                />
+                                <span className="text-sm text-gray-800 font-medium">No</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Conditional fields — only when Yes */}
+                    {hasInsurance === true && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-emerald-100">
+
+                            {/* Field 1: Insurance Provider */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    Insurance Provider <span className="text-red-500">*</span>
+                                </label>
+                                <select
+                                    className={`input ${validationErrors.insuranceProvider && insuranceProvider !== 'Other' ? 'border-red-500' : ''}`}
+                                    value={insuranceProvider}
+                                    onChange={(e) => {
+                                        setInsuranceProvider(e.target.value);
+                                        if (e.target.value !== 'Other') setInsuranceProviderOther('');
+                                    }}
+                                >
+                                    <option value="">— Select Provider —</option>
+                                    <option value="Star Health">Star Health</option>
+                                    <option value="Niva Bupa">Niva Bupa</option>
+                                    <option value="ICICI Lombard">ICICI Lombard</option>
+                                    <option value="HDFC ERGO">HDFC ERGO</option>
+                                    <option value="Care Health">Care Health</option>
+                                    <option value="Tata AIG">Tata AIG</option>
+                                    <option value="Aditya Birla Health">Aditya Birla Health</option>
+                                    <option value="SBI General">SBI General</option>
+                                    <option value="Reliance General">Reliance General</option>
+                                    <option value="Bajaj Allianz">Bajaj Allianz</option>
+                                    <option value="New India Assurance">New India Assurance</option>
+                                    <option value="Oriental Insurance">Oriental Insurance</option>
+                                    <option value="National Insurance">National Insurance</option>
+                                    <option value="United India Insurance">United India Insurance</option>
+                                    <option value="ACKO">ACKO</option>
+                                    <option value="ManipalCigna">ManipalCigna</option>
+                                    <option value="Other">Other</option>
+                                </select>
+
+                                {/* Manual entry when Other is chosen */}
+                                {insuranceProvider === 'Other' && (
+                                    <input
+                                        type="text"
+                                        className={`input mt-2 ${validationErrors.insuranceProvider ? 'border-red-500' : ''}`}
+                                        placeholder="Enter provider name"
+                                        value={insuranceProviderOther}
+                                        onChange={(e) => setInsuranceProviderOther(e.target.value)}
+                                        maxLength={80}
+                                    />
+                                )}
+                                {validationErrors.insuranceProvider && (
+                                    <p className="text-xs text-red-500 mt-1">{validationErrors.insuranceProvider}</p>
+                                )}
+                            </div>
+
+                            {/* Field 2: Policy Coverage Amount */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    Policy Coverage Amount (Sum Insured) <span className="text-red-500">*</span>
+                                </label>
+                                <select
+                                    className={`input ${validationErrors.insurancePolicyCoverage ? 'border-red-500' : ''}`}
+                                    value={insurancePolicyCoverage}
+                                    onChange={(e) => setInsurancePolicyCoverage(e.target.value)}
+                                >
+                                    <option value="">— Select Sum Insured —</option>
+                                    <option value="₹50,000">₹50,000</option>
+                                    <option value="₹1 Lakh">₹1 Lakh</option>
+                                    <option value="₹2 Lakhs">₹2 Lakhs</option>
+                                    <option value="₹3 Lakhs">₹3 Lakhs</option>
+                                    <option value="₹5 Lakhs">₹5 Lakhs</option>
+                                    <option value="₹7.5 Lakhs">₹7.5 Lakhs</option>
+                                    <option value="₹10 Lakhs">₹10 Lakhs</option>
+                                    <option value="₹15 Lakhs">₹15 Lakhs</option>
+                                    <option value="₹20 Lakhs">₹20 Lakhs</option>
+                                    <option value="₹25 Lakhs">₹25 Lakhs</option>
+                                    <option value="₹50 Lakhs">₹50 Lakhs</option>
+                                    <option value="₹75 Lakhs">₹75 Lakhs</option>
+                                    <option value="₹1 Crore">₹1 Crore</option>
+                                    <option value="Above ₹1 Crore">Above ₹1 Crore</option>
+                                </select>
+                                {validationErrors.insurancePolicyCoverage && (
+                                    <p className="text-xs text-red-500 mt-1">{validationErrors.insurancePolicyCoverage}</p>
+                                )}
+                                {insurancePolicyCoverage && !validationErrors.insurancePolicyCoverage && (
+                                    <p className="text-xs text-emerald-700 mt-1.5 font-medium">
+                                        ✓ Sum insured: {insurancePolicyCoverage}
+                                    </p>
+                                )}
+                                <p className="text-xs text-gray-400 mt-2 leading-relaxed">
+                                    Used to recommend hospitals that are compatible with the patient's insurance coverage in future versions.
+                                </p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* No-insurance acknowledgement */}
+                    {hasInsurance === false && (
+                        <div className="flex items-center gap-2 mt-1 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                            <svg className="w-4 h-4 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                            <span className="text-xs text-amber-800">
+                                No insurance recorded. Government scheme eligibility (PMJAY / Ayushman Bharat) may apply at the receiving hospital.
+                            </span>
+                        </div>
+                    )}
+                </section>
 
                 {/* Submit Button */}
                 <button

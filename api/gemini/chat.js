@@ -1,7 +1,7 @@
 /**
- * chat.js — Gemini 2.5 Flash AI Copilot Serverless Endpoint
+ * chat.js — GPT-5 mini AI Copilot Serverless Endpoint
  * 
- * Vercel serveless function that handles chat requests to Gemini API.
+ * Vercel serveless function that handles chat requests to OpenAI API.
  * Replaces Express server at server/geminiChat.js
  * 
  * POST /api/gemini/chat
@@ -9,9 +9,9 @@
 
 import { SYSTEM_PROMPTS, getExplainabilityInstruction } from '../utils/prompts.js';
 import { getSuggestedPrompts } from '../utils/suggestedPrompts.js';
+import { generateContent } from '../utils/llmClient.js';
 
 // Constants
-const GEMINI_MODEL = 'gemini-2.5-flash';
 const VALID_ROLES = ['paramedic', 'hospital_admin', 'command_center', 'dispatcher', 'admin'];
 
 // In-memory conversation history (serverless — will reset per cold start)
@@ -106,19 +106,6 @@ export default async function handler(req, res) {
             });
         }
 
-        // ═══════════════════════════════════════════════════════
-        // STEP 2: Check API key
-        // ═══════════════════════════════════════════════════════
-        const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-        if (!GEMINI_API_KEY) {
-            console.error('GEMINI_API_KEY not configured');
-            return res.status(500).json({
-                success: false,
-                error: 'Gemini API key not configured on server'
-            });
-        }
-
-        console.log('API key configured:', GEMINI_API_KEY ? 'Yes' : 'No');
 
         // ═══════════════════════════════════════════════════════
         // STEP 3: Validate role
@@ -150,80 +137,38 @@ Use the above context data to provide accurate, data-driven responses. If the co
         const history = getSessionHistory(sid);
 
         const contents = [
-            { role: 'user', parts: [{ text: `[SYSTEM INSTRUCTION]\n${fullSystemPrompt}` }] },
             { role: 'model', parts: [{ text: 'Understood. I am ready to assist as your EMS AI Copilot. How can I help?' }] },
             ...history,
             { role: 'user', parts: [{ text: message.trim() }] }
         ];
 
-        const geminiRequest = {
-            contents,
-            generationConfig: {
+        // ═══════════════════════════════════════════════════════
+        // STEP 5: Call API
+        // ═══════════════════════════════════════════════════════
+        let llmResponse;
+        try {
+            llmResponse = await generateContent({
+                systemPrompt: fullSystemPrompt,
+                messages: contents,
                 temperature: 0.7,
-                topK: 40,
-                topP: 0.95,
-                maxOutputTokens: 1024,
-            },
-            safetySettings: [
-                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-            ]
-        };
-
-        console.log('Gemini request prepared:', {
-            model: GEMINI_MODEL,
-            contentsCount: contents.length,
-            messageLength: message.length
-        });
-
-        // ═══════════════════════════════════════════════════════
-        // STEP 5: Call Gemini API
-        // ═══════════════════════════════════════════════════════
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-        console.log('Calling Gemini API:', GEMINI_URL.replace(GEMINI_API_KEY, 'REDACTED'));
-
-        const geminiResponse = await fetch(GEMINI_URL, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(geminiRequest)
-        });
-
-        console.log('Gemini response status:', geminiResponse.status);
-
-        if (!geminiResponse.ok) {
-            const errorText = await geminiResponse.text();
-            console.error(`Gemini API error (${geminiResponse.status}):`, errorText);
-
-            // Try to parse error as JSON for better messages
-            let errorDetail = errorText;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.error?.message || errorText;
-            } catch (e) {
-                // Keep raw text
-            }
-
+                maxTokens: 1024,
+                responseFormat: 'text',
+                model: 'gpt-4o-mini'
+            });
+        } catch (apiErr) {
+            console.error('LLM API Error:', apiErr);
             return res.status(502).json({
                 success: false,
-                error: `Gemini API returned ${geminiResponse.status}`,
-                details: errorDetail,
+                error: `AI API returned an error`,
+                details: apiErr.message,
                 fallback: '⚠️ AI Copilot temporarily unavailable. Please try again or consult standard EMS protocols.'
             });
         }
 
-        const geminiData = await geminiResponse.json();
-        console.log('Gemini response received successfully');
-
         // ═══════════════════════════════════════════════════════
         // STEP 6: Extract and return response
         // ═══════════════════════════════════════════════════════
-        const replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text
-            || 'I apologize, but I was unable to generate a response. Please try again.';
+        const replyText = llmResponse.text || 'I apologize, but I was unable to generate a response. Please try again.';
 
         // Store in history
         addToHistory(sid, 'user', message.trim());

@@ -2,14 +2,13 @@
  * /api/voice-intake-audio/index.js
  *
  * Accepts: { audio: "<base64>", mimeType: "audio/webm" | "audio/ogg" | ... }
- * Uses Gemini 2.5 Flash multimodal to:
+ * Uses GPT-5 mini multimodal to:
  *   1. Transcribe the audio
  *   2. Extract structured clinical fields in ONE call
  * Returns: { success, transcript, extractedData, confidenceScore, missingCriticalFields }
  */
 
-const GEMINI_API_URL =
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+import { generateContentFromAudio } from '../utils/llmClient.js';
 
 const CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
@@ -118,9 +117,9 @@ export default async function handler(req, res) {
         return res.status(429).json({ success: false, error: 'Rate limit exceeded. Please wait.' });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) {
-        return res.status(500).json({ success: false, error: 'API key not configured' });
+    const apiKey = process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY;
+    if (!apiKey || !apiKey.startsWith('sk-')) {
+        return res.status(500).json({ success: false, error: 'OpenAI API key not configured' });
     }
 
     const { audio, mimeType } = req.body || {};
@@ -138,40 +137,16 @@ export default async function handler(req, res) {
     const timeout = setTimeout(() => controller.abort(), 30_000); // 30s for audio
 
     try {
-        const geminiRes = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-                contents: [{
-                    role: 'user',
-                    parts: [
-                        { text: SYSTEM_PROMPT },
-                        {
-                            inlineData: {
-                                mimeType: resolvedMime,
-                                data: audio,
-                            }
-                        }
-                    ],
-                }],
-                generationConfig: {
-                    temperature: 0.1,
-                    responseMimeType: 'application/json',
-                    maxOutputTokens: 2048,
-                },
-            }),
+        const llmResponse = await generateContentFromAudio({
+            systemPrompt: SYSTEM_PROMPT,
+            audioBase64: audio,
+            mimeType: resolvedMime,
+            temperature: 0.1,
+            maxTokens: 2048,
+            model: 'gpt-4o-mini'
         });
-        clearTimeout(timeout);
 
-        if (!geminiRes.ok) {
-            const errText = await geminiRes.text().catch(() => '');
-            console.error('Gemini error:', geminiRes.status, errText);
-            return res.status(502).json({ success: false, error: 'AI service error. Please try again.' });
-        }
-
-        const geminiData = await geminiRes.json();
-        const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const rawText = llmResponse.text || '';
 
         let parsed;
         try {

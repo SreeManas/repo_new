@@ -12,6 +12,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { getFirestore, collection, onSnapshot, query, orderBy, limit, where, doc } from "firebase/firestore";
 import { rankHospitals, getTopRecommendations, calculateDistanceKm, normalizeHospital } from "../services/capabilityScoringEngine.js";
+import { buildClinicalRoutingContext } from "../services/qrRelevanceLayer.js";
 import {
     MapPin, Clock, AlertTriangle, Building2, Heart, Activity,
     Navigation, Zap, Users, ChevronRight, Timer, RefreshCw, Layers,
@@ -330,7 +331,12 @@ export default function RoutingDashboard() {
 
         // Debounce by 800ms to prevent UI thrashing
         recomputeTimeoutRef.current = setTimeout(() => {
-            const ranked = rankHospitals(hospitals, selectedCase);
+            // Attach ClinicalRoutingContext when QR history is present.
+            // buildClinicalRoutingContext returns { applicable: false } when no QR
+            // was scanned — the engine then behaves identically to before.
+            const clinicalContext = buildClinicalRoutingContext(selectedCase, selectedCase.patientHistory);
+            const caseForRouting = { ...selectedCase, clinicalContext };
+            const ranked = rankHospitals(hospitals, caseForRouting);
             setRankedHospitals(ranked);
             setScoringLastRun(Date.now());
             setIsRecomputing(false);

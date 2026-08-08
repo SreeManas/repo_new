@@ -21,6 +21,7 @@ import { dirname, join } from 'path';
 import { buildRoleContext } from './roleContextBuilder.js';
 import { SYSTEM_PROMPTS, getExplainabilityInstruction } from './systemPrompts.js';
 import { getSuggestedPrompts } from './suggestedPrompts.js';
+import { generateContent } from '../api/utils/llmClient.js';
 
 // Load env from server/.env
 const __filename = fileURLToPath(import.meta.url);
@@ -30,8 +31,6 @@ dotenv.config({ path: join(__dirname, '.env') });
 const app = express();
 const PORT = process.env.GEMINI_PORT || 5002;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = 'gemini-2.0-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 // Valid EMS roles
 const VALID_ROLES = ['paramedic', 'hospital_admin', 'command_center', 'dispatcher', 'admin'];
@@ -171,51 +170,32 @@ Use the above context data to provide accurate, data-driven responses. If the co
         const history = getSessionHistory(sid);
 
         const contents = [
-            // System instruction as first user message
-            { role: 'user', parts: [{ text: `[SYSTEM INSTRUCTION]\n${fullSystemPrompt}` }] },
             { role: 'model', parts: [{ text: 'Understood. I am ready to assist as your EMS AI Copilot. How can I help?' }] },
-            // Past conversation
             ...history,
-            // Current message
             { role: 'user', parts: [{ text: message.trim() }] }
         ];
 
-        // Call Gemini API
-        const geminiResponse = await fetch(GEMINI_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents,
-                generationConfig: {
-                    temperature: 0.7,
-                    topK: 40,
-                    topP: 0.95,
-                    maxOutputTokens: 1024,
-                },
-                safetySettings: [
-                    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-                ]
-            })
-        });
-
-        if (!geminiResponse.ok) {
-            const errorBody = await geminiResponse.text();
-            console.error(`Gemini API error (${geminiResponse.status}):`, errorBody);
+        let llmResponse;
+        try {
+            llmResponse = await generateContent({
+                systemPrompt: fullSystemPrompt,
+                messages: contents,
+                temperature: 0.7,
+                maxTokens: 1024,
+                responseFormat: 'text',
+                model: 'gpt-5-mini'
+            });
+        } catch (apiErr) {
+            console.error('LLM API error:', apiErr);
             return res.status(502).json({
                 success: false,
-                error: `Gemini API returned ${geminiResponse.status}`,
-                details: errorBody
+                error: `AI API returned an error`,
+                details: apiErr.message
             });
         }
 
-        const geminiData = await geminiResponse.json();
-
         // Extract response text
-        const replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text
-            || 'I apologize, but I was unable to generate a response. Please try again.';
+        const replyText = llmResponse.text || 'I apologize, but I was unable to generate a response. Please try again.';
 
         // Store in conversation history
         addToHistory(sid, 'user', message.trim());
@@ -287,5 +267,5 @@ app.listen(PORT, () => {
     console.log(`   Health: http://localhost:${PORT}/api/gemini/health`);
     console.log(`   Chat:   POST http://localhost:${PORT}/api/gemini/chat`);
     console.log(`   Gemini: ${GEMINI_API_KEY ? '✅ configured' : '❌ NOT configured'}`);
-    console.log(`   Model:  ${GEMINI_MODEL}\n`);
+    console.log(`   Model:  gpt-5-mini\n`);
 });

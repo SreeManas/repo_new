@@ -1,7 +1,7 @@
 /**
  * EMSChatAssistant.jsx — Floating AI Copilot Chat Widget
  * 
- * Role-aware chat UI powered by Gemini 2.5 Flash.
+ * Role-aware chat UI powered by GPT-5 mini.
  * Features:
  * - Floating toggle button (bottom-right)
  * - Role badge display
@@ -332,19 +332,6 @@ export default function EMSChatAssistant() {
                         )}
                     </div>
 
-                    {/* Server Status Banner */}
-                    {isHealthy === false && (
-                        <div style={{
-                            padding: '8px 16px',
-                            background: '#7f1d1d',
-                            color: '#fca5a5',
-                            fontSize: '11px',
-                            textAlign: 'center',
-                            flexShrink: 0,
-                        }}>
-                            ⚠️ AI server offline — run <code style={{ background: '#450a0a', padding: '1px 4px', borderRadius: '3px' }}>npm run gemini-server</code>
-                        </div>
-                    )}
 
                     {/* Messages Area */}
                     <div style={{
@@ -363,7 +350,7 @@ export default function EMSChatAssistant() {
                                     MEDROUTER AI Assistant
                                 </div>
                                 <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '20px' }}>
-                                    Powered by Gemini 2.5 Flash • {roleConfig.label} Mode
+                                    Powered by GPT-5 mini • {roleConfig.label} Mode
                                 </div>
 
                                 {/* Suggested Prompts */}
@@ -599,7 +586,7 @@ export default function EMSChatAssistant() {
                             </button>
                         </div>
                         <div style={{ color: '#475569', fontSize: '10px', marginTop: '6px', textAlign: 'center' }}>
-                            Gemini 2.5 Flash • Role: {roleConfig.label} • EMS Decision Intelligence
+                            GPT-5 mini • Role: {roleConfig.label} • EMS Decision Intelligence
                         </div>
                     </div>
                 </div>

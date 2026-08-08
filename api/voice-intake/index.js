@@ -3,11 +3,12 @@
  *
  * POST /api/voice-intake
  * Receives paramedic speech transcript, returns structured clinical fields.
- * Uses Gemini 2.5 Flash with temperature 0.1 for deterministic extraction.
+ * Uses GPT-5 mini with temperature 0.1 for deterministic extraction.
  * Returns JSON-only — rejects free text and malformed output.
  */
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+import { generateContent } from '../utils/llmClient.js';
+
 const MAX_TRANSCRIPT_LENGTH = 2000;
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -146,46 +147,19 @@ export default async function handler(req, res) {
         return res.status(400).json({ success: false, error: 'Transcript too short' });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) {
-        return res.status(500).json({ success: false, error: 'Gemini API key not configured' });
-    }
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-
-    const body = {
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: 'user', parts: [{ text: `Extract clinical data from this paramedic transcript:\n\n"${clean}"` }] }],
-        generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 2048,
-            responseMimeType: 'application/json',
-        },
-    };
-
     let result;
     try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal: controller.signal,
+        const llmResponse = await generateContent({
+            systemPrompt: SYSTEM_PROMPT,
+            messages: [{ role: 'user', parts: [{ text: `Extract clinical data from this paramedic transcript:\n\n"${clean}"` }] }],
+            temperature: 0.1,
+            maxTokens: 2048,
+            responseFormat: 'json'
         });
-        clearTimeout(timeout);
 
-        if (!response.ok) {
-            const errText = await response.text().catch(() => '');
-            console.error('Gemini API error:', response.status, errText);
-            return res.status(502).json({ success: false, error: 'Gemini API error', details: response.status });
-        }
-
-        const geminiResponse = await response.json();
-        const rawText = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text;
+        const rawText = llmResponse.text;
         if (!rawText) {
-            return res.status(502).json({ success: false, error: 'Empty Gemini response' });
+            return res.status(502).json({ success: false, error: 'Empty AI response' });
         }
 
         try {
@@ -196,12 +170,12 @@ export default async function handler(req, res) {
             try {
                 result = JSON.parse(stripped);
             } catch {
-                return res.status(502).json({ success: false, error: 'Gemini returned malformed JSON', raw: rawText.slice(0, 200) });
+                return res.status(502).json({ success: false, error: 'AI returned malformed JSON', raw: rawText.slice(0, 200) });
             }
         }
 
         if (!validateExtracted(result)) {
-            return res.status(502).json({ success: false, error: 'Gemini response failed schema validation', raw: rawText.slice(0, 200) });
+            return res.status(502).json({ success: false, error: 'AI response failed schema validation', raw: rawText.slice(0, 200) });
         }
 
     } catch (err) {

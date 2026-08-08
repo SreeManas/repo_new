@@ -1,14 +1,14 @@
 /**
  * /api/triage/index.js — AI Vital-Sign Triage Engine
  *
- * Serverless endpoint implementing START/SALT triage using Gemini 2.5 Flash.
+ * Serverless endpoint implementing START/SALT triage using GPT-5 mini.
  * Returns strict JSON — no free text output allowed.
- * Falls back to local rule-based triage if Gemini fails.
+ * Falls back to local rule-based triage if AI fails.
  *
  * POST /api/triage
  */
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+import { generateContent } from '../utils/llmClient.js';
 
 // ─── Rate limiting (in-memory, resets on cold start) ───────────────────────
 const rateLimitMap = new Map();
@@ -276,8 +276,8 @@ export default async function handler(req, res) {
     const hasMinVitals = safe.heartRate !== null || safe.spo2 !== null || safe.respiratoryRate !== null;
 
     // ── API key ───────────────────────────────────────────────────────────────
-    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-    if (!GEMINI_API_KEY) {
+    const API_KEY = process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY;
+    if (!API_KEY || !API_KEY.startsWith('sk-')) {
         // Fall back to local rules
         const fallback = runFallbackTriage(safe);
         return res.status(200).json({ success: true, triage: { ...fallback, source: 'fallback_no_api_key' } });
@@ -311,66 +311,29 @@ export default async function handler(req, res) {
         `Seizure Activity: ${safe.seizureActivity ? 'Yes' : 'No'}`,
     ].join('\n');
 
-    const geminiRequest = {
-        contents: [
-            { role: 'user', parts: [{ text: `[SYSTEM]\n${buildTriageSystemPrompt()}` }] },
-            { role: 'model', parts: [{ text: 'Understood. I will return only valid JSON triage classification based on START/SALT protocol.' }] },
-            { role: 'user', parts: [{ text: `PATIENT VITALS FOR TRIAGE CLASSIFICATION:\n\n${vitalsText}\n\nReturn JSON only.` }] }
-        ],
-        generationConfig: {
-            temperature: 0.1,
-            topK: 10,
-            topP: 0.9,
-            maxOutputTokens: 300,
-            responseMimeType: 'application/json',
-        },
-        safetySettings: [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-        ]
-    };
-
-    // ── Call Gemini ───────────────────────────────────────────────────────────
+    // ── Call API ───────────────────────────────────────────────────────────
     try {
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-        console.log('[TRIAGE DEBUG] Calling Gemini:', GEMINI_URL.replace(GEMINI_API_KEY, 'REDACTED'));
+        console.log('[TRIAGE DEBUG] Calling AI Model');
         console.log('[TRIAGE DEBUG] Sanitized vitals:', JSON.stringify(safe));
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => {
-            console.error('[TRIAGE DEBUG] ⏰ TIMEOUT — 15s exceeded, aborting Gemini call');
-            controller.abort();
-        }, 15_000);
-
-        const geminiResponse = await fetch(GEMINI_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(geminiRequest),
-            signal: controller.signal
+        const llmResponse = await generateContent({
+            systemPrompt: buildTriageSystemPrompt(),
+            messages: [
+                { role: 'model', parts: [{ text: 'Understood. I will return only valid JSON triage classification based on START/SALT protocol.' }] },
+                { role: 'user', parts: [{ text: `PATIENT VITALS FOR TRIAGE CLASSIFICATION:\n\n${vitalsText}\n\nReturn JSON only.` }] }
+            ],
+            maxTokens: 300,
+            responseFormat: 'json',
+            model: 'gpt-4o-mini'
         });
-        clearTimeout(timeout);
 
-        console.log('[TRIAGE DEBUG] Gemini HTTP status:', geminiResponse.status);
+        const rawText = llmResponse.text || '';
 
-        if (!geminiResponse.ok) {
-            const errBody = await geminiResponse.text().catch(() => '');
-            console.error('[TRIAGE DEBUG] Gemini API error body:', errBody.slice(0, 500));
-            throw new Error(`Gemini API error: ${geminiResponse.status} — ${errBody.slice(0, 200)}`);
-        }
-
-        const geminiData = await geminiResponse.json();
-        const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-        console.log('[TRIAGE DEBUG] Raw Gemini response text:', rawText.slice(0, 600));
+        console.log('[TRIAGE DEBUG] Raw AI response text:', rawText.slice(0, 600));
 
         if (!rawText) {
-            const blockReason = geminiData?.candidates?.[0]?.finishReason;
-            const safetyBlock = geminiData?.promptFeedback?.blockReason;
-            console.error('[TRIAGE DEBUG] Empty response. finishReason:', blockReason, 'safetyBlock:', safetyBlock);
-            throw new Error(`Empty Gemini response. finishReason=${blockReason}, safety=${safetyBlock}`);
+            console.error('[TRIAGE DEBUG] Empty response.');
+            throw new Error(`Empty AI response.`);
         }
 
         // Extract JSON from response
@@ -383,7 +346,7 @@ export default async function handler(req, res) {
             const jsonMatch = rawText.match(/\{[\s\S]*\}/);
             if (!jsonMatch) {
                 console.error('[TRIAGE DEBUG] No JSON object found in response at all');
-                throw new Error('No JSON found in Gemini response');
+                throw new Error('No JSON found in AI response');
             }
             parsed = JSON.parse(jsonMatch[0]);
         }
@@ -392,13 +355,13 @@ export default async function handler(req, res) {
 
         if (!validateTriageResponse(parsed)) {
             console.error('[TRIAGE DEBUG] Schema validation FAILED after auto-fix attempts');
-            throw new Error('Gemini returned invalid triage schema');
+            throw new Error('AI returned invalid triage schema');
         }
 
         console.log('[TRIAGE DEBUG] ✅ Validation passed. source=gemini');
 
         // ── SAFETY DOMINANCE: Rule-based floor always wins ──────────────────
-        const dominantResult = applySafetyDominance({ ...parsed, source: 'gemini' }, safe);
+        const dominantResult = applySafetyDominance({ ...parsed, source: 'ai' }, safe);
         // Attach ambulance type recommendation
         dominantResult.ambulanceType = getAmbulanceType(dominantResult.acuity_level);
 
@@ -410,8 +373,8 @@ export default async function handler(req, res) {
         });
 
     } catch (err) {
-        // Any Gemini failure → fall back to local rules
-        console.error('[TRIAGE DEBUG] ❌ Gemini triage FAILED:', err.message);
+        // Any AI failure → fall back to local rules
+        console.error('[TRIAGE DEBUG] ❌ AI triage FAILED:', err.message);
         console.error('[TRIAGE DEBUG] Stack:', err.stack?.split('\n').slice(0, 3).join(' | '));
         const fallback = runFallbackTriage(safe);
         return res.status(200).json({
